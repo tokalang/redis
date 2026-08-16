@@ -110,19 +110,39 @@ def generate_tls_fixture(package: Path, openssl: str,
     fixture = package / ".toka-test" / "tls"
     fixture.mkdir(parents=True, mode=0o700)
     fixture.chmod(0o700)
-    certificate = fixture / "localhost.crt"
-    private_key = fixture / "localhost.key"
-    private_key.touch(mode=0o600)
-    private_key.chmod(0o600)
+    ca_key = fixture / "ca.key"
+    ca_cert = fixture / "ca.crt"
+    server_key = fixture / "server.key"
+    server_csr = fixture / "server.csr"
+    server_cert = fixture / "server.crt"
+    extensions = fixture / "server.ext"
+    extensions.write_text(
+        "[v3_req]\n"
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n",
+        encoding="utf-8",
+    )
     run([
         openssl, "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes",
-        "-days", "1", "-subj", "/CN=localhost",
-        "-addext", "basicConstraints=critical,CA:TRUE",
-        "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
-        "-keyout", str(private_key), "-out", str(certificate),
+        "-keyout", str(ca_key), "-out", str(ca_cert), "-days", "1",
+        "-subj", "/CN=toka-redis-test-ca",
     ], cwd=package, env=env)
-    private_key.chmod(0o600)
-    certificate.chmod(0o644)
+    run([
+        openssl, "req", "-newkey", "rsa:2048", "-sha256", "-nodes",
+        "-keyout", str(server_key), "-out", str(server_csr),
+        "-subj", "/CN=localhost",
+    ], cwd=package, env=env)
+    run([
+        openssl, "x509", "-req", "-in", str(server_csr),
+        "-CA", str(ca_cert), "-CAkey", str(ca_key), "-CAcreateserial",
+        "-out", str(server_cert), "-days", "1", "-sha256",
+        "-extfile", str(extensions), "-extensions", "v3_req",
+    ], cwd=package, env=env)
+    ca_cert.chmod(0o644)
+    server_cert.chmod(0o644)
+    server_key.chmod(0o600)
 
 
 def write_consumer(project: Path, dependency: Path) -> None:

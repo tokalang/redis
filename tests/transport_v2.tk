@@ -124,7 +124,7 @@ fn tls_server_async(cede listener: TcpListener) -> async i32 {
     auto tcp# = listener#.accept_async().await
     if !tcp.is_valid() { return 1 }
     auto secured = TlsStream::accept_with_cert_file_async(tcp,
-        string::from(".toka-test/tls/localhost.crt"), string::from(".toka-test/tls/localhost.key")).await
+        string::from(".toka-test/tls/server.crt"), string::from(".toka-test/tls/server.key")).await
     if secured.is_err() { return 2 }
     auto stream# = secured.unwrap()
     if read_stream_async(stream).await.is_err() { stream#.close(); return 3 }
@@ -134,9 +134,9 @@ fn tls_server_async(cede listener: TcpListener) -> async i32 {
 }
 
 fn tls_client_async(port: u16) -> async i32 {
-    sleep_async(10:i64).await
+    sleep_async(20:i64).await
     auto address = SocketAddrV4::new(Ipv4Addr::new(127:u8, 0:u8, 0:u8, 1:u8), port)
-    auto connected = RedisClient::connect_tls_with_ca_file_async(cede address, "localhost", ".toka-test/tls/localhost.crt", 1000:i32).await
+    auto connected = RedisClient::connect_tls_with_ca_file_async(cede address, "localhost", ".toka-test/tls/ca.crt", 5000:i32).await
     if connected.is_err() { return 1 }
     auto client# = connected.unwrap()
     auto reply = client#.execute_async(cede RedisCommand::new("PING")).await
