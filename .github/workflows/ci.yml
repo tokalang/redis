@@ -1,0 +1,149 @@
+name: Redis package qualification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TOKA_VERSION: v1.0.0-rc.5
+
+jobs:
+  qualify:
+    name: Qualify (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-22.04
+            asset: toka-v1.0.0-rc.5-linux-x64.tar.gz
+            sha256: 16d5c2202553915aeb25fd3e5957fad15d86c460da00639fbba2af13bb2daedf
+          - name: macos-arm64
+            runner: macos-15
+            asset: toka-v1.0.0-rc.5-macos-arm64.tar.gz
+            sha256: 2560ddfc84702204c49c48715e1a044601dae50a82ff0394adfbd486adb2af90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo -E apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y curl libssl-dev lsb-release pkg-config \
+            software-properties-common wget
+          wget --timeout=15 --tries=3 https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo -E ./llvm.sh 20
+          echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
+          echo "CC=clang-20" >> "$GITHUB_ENV"
+
+      - name: Install native dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          brew install llvm@20 lld@20 pkgconf openssl@3
+          llvm_prefix="$(brew --prefix llvm@20)"
+          openssl_prefix="$(brew --prefix openssl@3)"
+          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+          echo "CC=$llvm_prefix/bin/clang" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$openssl_prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Install locked Toka SDK
+        env:
+          TOKA_ASSET: ${{ matrix.asset }}
+          TOKA_ASSET_SHA256: ${{ matrix.sha256 }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/$TOKA_ASSET"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/$TOKA_ASSET"
+          python3 -c 'import hashlib, pathlib, sys; actual = hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(); expected = sys.argv[2]; assert actual == expected, f"SHA-256 mismatch: {actual} != {expected}"' \
+            "$archive" "$TOKA_ASSET_SHA256"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sdk="$RUNNER_TEMP/${TOKA_ASSET%.tar.gz}"
+          test -x "$sdk/bin/toka"
+          test -x "$sdk/bin/tokac"
+          test -f "$sdk/lib/sys/toka_rt.o"
+          echo "$sdk/bin" >> "$GITHUB_PATH"
+          echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
+          echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+
+      - name: Verify locked toolchain
+        run: |
+          set -euo pipefail
+          "$TOKA" --version | grep -F "1.0.0-rc.5"
+          "$TOKAC" --version | grep -F "1.0.0-rc.5"
+          pkg-config --exists openssl
+
+      - name: Run standalone qualification
+        run: python3 tests/qualify_package.py
+
+  real-service:
+    name: Real service (Redis 7.4/8.2)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo -E apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y curl libssl-dev lsb-release pkg-config \
+            software-properties-common wget
+          wget --timeout=15 --tries=3 https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo -E ./llvm.sh 20
+          echo "/usr/lib/llvm-20/bin" >> "$GITHUB_PATH"
+          echo "CC=clang-20" >> "$GITHUB_ENV"
+
+      - name: Install locked Toka SDK
+        env:
+          TOKA_ASSET: toka-v1.0.0-rc.5-linux-x64.tar.gz
+          TOKA_ASSET_SHA256: 16d5c2202553915aeb25fd3e5957fad15d86c460da00639fbba2af13bb2daedf
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/$TOKA_ASSET"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/$TOKA_ASSET"
+          python3 -c 'import hashlib, pathlib, sys; actual = hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest(); expected = sys.argv[2]; assert actual == expected, f"SHA-256 mismatch: {actual} != {expected}"' \
+            "$archive" "$TOKA_ASSET_SHA256"
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sdk="$RUNNER_TEMP/${TOKA_ASSET%.tar.gz}"
+          test -x "$sdk/bin/tokac"
+          test -f "$sdk/lib/sys/toka_rt.o"
+          echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+
+      - name: Run real-service qualification
+        run: python3 tests/qualify_real_service.py --report build/redis-real-service.json
+
+      - name: Upload fail-closed evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-real-service
+          path: build/redis-real-service.json
+          if-no-files-found: error

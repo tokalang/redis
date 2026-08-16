@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify official/redis through the locked local-package and offline paths."""
+"""Qualify official/redis deterministic suites and a locked package consumer."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ import subprocess
 import tempfile
 
 
-ROOT = Path(__file__).resolve().parents[3]
-PACKAGE = ROOT / "official" / "redis"
+PACKAGE = Path(__file__).resolve().parents[1]
 
 
 class QualificationError(RuntimeError):
     pass
 
 
-def run(argv: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def run(argv: list[str], *, cwd: Path,
+        env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         argv,
         cwd=cwd,
@@ -31,10 +31,98 @@ def run(argv: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.Comple
     )
     if result.returncode != 0:
         raise QualificationError(
-            "command failed: %s\nstdout:\n%s\nstderr:\n%s"
-            % (" ".join(argv), result.stdout, result.stderr)
+            "command failed (%d): %s\nstdout:\n%s\nstderr:\n%s"
+            % (result.returncode, " ".join(argv), result.stdout, result.stderr)
         )
     return result
+
+
+def resolve_toolchain(env: dict[str, str]) -> tuple[Path, Path, Path, Path, Path]:
+    root_is_set = "TOKA_ROOT" in env
+    explicit_keys = ("TOKA", "TOKAC", "TOKA_LIB")
+    explicit_set = [key for key in explicit_keys if key in env]
+    if root_is_set and explicit_set:
+        raise QualificationError(
+            "set either TOKA_ROOT or TOKA/TOKAC/TOKA_LIB, not both"
+        )
+    if root_is_set:
+        if not env["TOKA_ROOT"].strip():
+            raise QualificationError("TOKA_ROOT must not be empty")
+        root = Path(env["TOKA_ROOT"]).expanduser().resolve()
+        toka = root / "build" / "bin" / "toka"
+        tokac = root / "build" / "bin" / "tokac"
+        library = root / "lib"
+        runtime = library / "sys" / "toka_rt.o"
+        build_driver = root / "tools" / "scripts" / "toka_build.py"
+    else:
+        if len(explicit_set) != len(explicit_keys):
+            missing = ", ".join(key for key in explicit_keys if key not in env)
+            raise QualificationError(
+                "set TOKA_ROOT or all of TOKA/TOKAC/TOKA_LIB"
+                + (" (missing: " + missing + ")" if missing else "")
+            )
+        empty = [key for key in explicit_keys if not env[key].strip()]
+        if empty:
+            raise QualificationError(
+                "toolchain variables must not be empty: " + ", ".join(empty)
+            )
+        toka = Path(env["TOKA"]).expanduser().resolve()
+        tokac = Path(env["TOKAC"]).expanduser().resolve()
+        library = Path(env["TOKA_LIB"]).expanduser().resolve()
+        runtime = library / "sys" / "toka_rt.o"
+        build_driver = library / "toolchain" / "toka_build.py"
+
+    required_files = {
+        "toka": toka,
+        "tokac": tokac,
+        "toka_rt.o": runtime,
+        "toka_build.py": build_driver,
+    }
+    missing_files = [name for name, path in required_files.items() if not path.is_file()]
+    if not library.is_dir():
+        missing_files.append("TOKA_LIB")
+    if missing_files:
+        raise QualificationError(
+            "incomplete Toka toolchain (missing: %s)" % ", ".join(missing_files)
+        )
+    return toka, tokac, library, runtime, build_driver
+
+
+def make_sdk(work: Path, source_library: Path, runtime: Path,
+             build_driver: Path) -> Path:
+    library = work / "sdk" / "lib"
+    shutil.copytree(
+        source_library,
+        library,
+        ignore=shutil.ignore_patterns("*.pyc", "__pycache__"),
+    )
+    runtime_dir = library / "sys"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(runtime, runtime_dir / "toka_rt.o")
+    toolchain = library / "toolchain"
+    toolchain.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(build_driver, toolchain / "toka_build.py")
+    return library
+
+
+def generate_tls_fixture(package: Path, openssl: str,
+                         env: dict[str, str]) -> None:
+    fixture = package / ".toka-test" / "tls"
+    fixture.mkdir(parents=True, mode=0o700)
+    fixture.chmod(0o700)
+    certificate = fixture / "localhost.crt"
+    private_key = fixture / "localhost.key"
+    private_key.touch(mode=0o600)
+    private_key.chmod(0o600)
+    run([
+        openssl, "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes",
+        "-days", "1", "-subj", "/CN=localhost",
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        "-keyout", str(private_key), "-out", str(certificate),
+    ], cwd=package, env=env)
+    private_key.chmod(0o600)
+    certificate.chmod(0o644)
 
 
 def write_consumer(project: Path, dependency: Path) -> None:
@@ -78,39 +166,51 @@ def write_consumer(project: Path, dependency: Path) -> None:
     )
 
 
-def make_sdk(work: Path) -> Path:
-    library = work / "sdk" / "lib"
-    shutil.copytree(ROOT / "lib", library)
-    toolchain = library / "toolchain"
-    toolchain.mkdir(exist_ok=True)
-    shutil.copy2(ROOT / "tools" / "scripts" / "toka_build.py", toolchain / "toka_build.py")
-    return library
-
-
 def main() -> int:
-    toka = ROOT / "build" / "bin" / "toka"
-    tokac = ROOT / "build" / "bin" / "tokac"
-    if not toka.is_file() or not tokac.is_file():
-        raise QualificationError("build toka and tokac before package qualification")
+    host_env = dict(os.environ)
+    toka, tokac, source_library, runtime, build_driver = resolve_toolchain(host_env)
+    openssl = shutil.which("openssl", path=host_env.get("PATH"))
+    if openssl is None:
+        raise QualificationError("OpenSSL executable is required for the TLS fixture")
 
     with tempfile.TemporaryDirectory(prefix="toka-redis-package-") as temporary:
         work = Path(temporary)
-        base_env = dict(os.environ)
-        base_env.update({"TOKAC": str(tokac), "TOKA_LIB": str(make_sdk(work))})
-        test_env = dict(os.environ)
-        test_env.pop("TOKA_LIB", None)
-        test_env.pop("TOKAC", None)
-        include = ["-I", str(ROOT / "lib"), "-I", str(PACKAGE / "lib")]
-        # The native TLS runtime is linked only for executables emitted
-        # directly under /tmp by the current toolchain, so keep these short-
-        # lived qualification binaries there rather than in a child folder.
-        for name in ("codec_v1", "client_v1", "transport_v2", "pool_v1"):
-            executable = Path("/tmp") / f"toka-redis-qualify-{os.getpid()}-{name}"
-            run([str(tokac), *include, str(PACKAGE / "tests" / f"{name}.tk"),
-                 "-o", str(executable)], cwd=ROOT, env=test_env)
-            run([str(executable)], cwd=ROOT, env=test_env)
+        sdk = make_sdk(work, source_library, runtime, build_driver)
+        base_env = dict(host_env)
+        base_env.update({"TOKAC": str(tokac), "TOKA_LIB": str(sdk)})
+        base_env.pop("TOKA_ROOT", None)
+        base_env.pop("TOKA", None)
+        base_env.pop("TOKA_OFFLINE", None)
+        exec_env = dict(base_env)
+        exec_env.pop("TOKA_LIB", None)
         dependency = work / "redis"
-        shutil.copytree(PACKAGE, dependency)
+        shutil.copytree(
+            PACKAGE,
+            dependency,
+            ignore=shutil.ignore_patterns(
+                ".git", ".toka-test", "__pycache__", "*.pyc"
+            ),
+        )
+        generate_tls_fixture(dependency, openssl, base_env)
+
+        include = ["-I", str(sdk), "-I", str(dependency / "lib")]
+        deterministic_suites = (
+            "codec_v1",
+            "client_v1",
+            "clone_ownership_v1",
+            "transport_v2",
+            "pool_v1",
+        )
+        for suite in deterministic_suites:
+            program = work / suite
+            run([str(tokac), *include,
+                 str(dependency / "tests" / (suite + ".tk")),
+                 "-o", str(program)], cwd=dependency, env=base_env)
+            run([str(program)], cwd=dependency, env=exec_env)
+        shutil.rmtree(dependency / ".toka-test")
+        if any(dependency.rglob("*.key")):
+            raise QualificationError("TLS private key remained in the package tree")
+
         project = work / "consumer"
         write_consumer(project, dependency)
 
@@ -126,19 +226,23 @@ def main() -> int:
         if lock.read_bytes() != locked:
             raise QualificationError("offline Redis fetch changed package.lock")
         run([str(toka), "build"], cwd=project, env=offline_env)
-        run([str(project / "target" / "debug" / "redis_consumer")], cwd=project, env=offline_env)
+        program = project / "target" / "debug" / "redis_consumer"
+        if not program.is_file():
+            raise QualificationError("toka build did not produce Redis consumer")
+        run([str(program)], cwd=project, env=offline_env)
 
     print(json.dumps({
         "result": "pass",
         "schema": "toka.official-redis-package-v1",
         "stages": {
+            "bounded_connection_pool": "pass",
+            "clone_ownership": "pass",
             "locked_local_dependency": "pass",
             "offline_lock_replay": "pass",
             "public_import_build_run": "pass",
             "resp2_codec": "pass",
             "serial_client": "pass",
             "verified_tls_and_pipeline": "pass",
-            "bounded_connection_pool": "pass",
         },
         "version": 1,
     }, sort_keys=True, separators=(",", ":")))

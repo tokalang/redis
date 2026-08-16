@@ -1,4 +1,7 @@
-# `official/redis` v1
+# `official/redis`
+
+Official opt-in Redis client package for Toka. Package version `0.2.0` is the
+first standalone release line. This document describes API profile v1.
 
 Status: **bounded RESP2 codec, serial TCP/TLS client, ordered pipelines, and bounded connection pooling**.
 
@@ -72,15 +75,29 @@ I/O, cancellation, decode/protocol failure, or an unread/extra pipeline reply.
 
 ## Qualification
 
-Run from this package root:
+The required qualification toolchain is the published Toka `v1.0.0-rc.5` SDK.
+Install OpenSSL, pkg-config, and Clang, then provide either an installed SDK
+explicitly:
 
-```text
-../../build/bin/tokac -I ../../lib -I lib tests/codec_v1.tk -o /tmp/redis_codec_v1 && /tmp/redis_codec_v1
-../../build/bin/tokac -I ../../lib -I lib tests/client_v1.tk -o /tmp/redis_client_v1 && /tmp/redis_client_v1
-../../build/bin/tokac -I ../../lib -I lib tests/transport_v2.tk -o /tmp/redis_transport_v2 && /tmp/redis_transport_v2
-../../build/bin/tokac -I ../../lib -I lib tests/pool_v1.tk -o /tmp/redis_pool_v1 && /tmp/redis_pool_v1
+```sh
+TOKA=/path/to/bin/toka \
+TOKAC=/path/to/bin/tokac \
+TOKA_LIB=/path/to/lib \
 python3 tests/qualify_package.py
 ```
+
+or a Toka source checkout whose `build/bin/toka`, `build/bin/tokac`, and
+`lib/sys/toka_rt.o` have already been built:
+
+```sh
+TOKA_ROOT=/path/to/toka python3 tests/qualify_package.py
+```
+
+Qualification builds and runs all five deterministic codec, ownership, client,
+TLS/pipeline, and pool suites. It generates a one-run localhost certificate and
+private key only inside its temporary package copy; no test private key is
+tracked. It then performs a first local path fetch, replays the resulting lock
+with `TOKA_OFFLINE=1`, and builds and runs an isolated public-import consumer.
 
 Real-service compatibility is a separate fail-closed Docker qualification. It
 verifies Redis 7.4.x and 8.2.x with password TCP and private-CA TLS; a
@@ -88,24 +105,35 @@ successful local Docker run is maintainer evidence, while Linux CI records the
 release-gate artifact. A runner that cannot publish loopback ports is reported
 as `not-run`, never as a passing package test.
 
-```text
-python3 tools/scripts/qualify_data_access_real.py --tokac build/bin/tokac --report build/data-access-real-service.json
+```sh
+TOKAC=/path/to/bin/tokac \
+TOKA_LIB=/path/to/lib \
+python3 tests/qualify_real_service.py \
+  --report build/redis-real-service.json
 ```
 
-Run that command from the Toka repository root. The exact scope and artifact
-policy remain with the canonical source until the standalone runner is
-qualified and migrated separately.
+The runner compiles this checkout's `tests/real_service_v1.tk` and
+`tests/clone_ownership_v1.tk`, then tests the `redis:7.4-alpine` and
+`redis:8.2-alpine` images. Missing compiler, runtime, OpenSSL, Docker, or
+loopback publication writes a `status: not-run` report and exits 2. A failed
+compatibility check writes `status: failed` and exits 1; only the complete
+matrix writes `status: passed` and exits 0.
+
+Qualification on CI is executed on **Linux x64 (`ubuntu-22.04`)** and
+**macOS arm64 (`macos-15`)**.
 
 ## Repository migration
 
-This repository has imported the package history but is not yet the canonical
-package source. Until standalone qualification, release, and locked registry
-consumer replay are complete, the authoritative source remains
-[`tokalang/toka/official/redis`](https://github.com/tokalang/toka/tree/main/official/redis).
+This repository is the standalone cutover candidate. Until the release, catalog
+consumer replay, and Toka-root removal complete,
+[`tokalang/toka/official/redis`](https://github.com/tokalang/toka/tree/main/official/redis)
+remains authoritative.
 
-Cutover will be one-way. The compiler repository copy will be removed only
-after existing consumers have moved to the released, locked package; this
-repository will not become a long-lived mirror or submodule.
+Cutover will be one-way. The compiler repository copy will be removed only after
+the standalone CI is green, the `v0.2.0` release is published, the verified
+catalog entry is registered, and existing consumers have moved to the released,
+locked package; this repository will not become a long-lived mirror or
+submodule.
 
 The history was imported with `git subtree split` from
 `tokalang/toka@07d86771cc5b28d73f75e8ab560284315a904685`, path
