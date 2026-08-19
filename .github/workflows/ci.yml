@@ -55,25 +55,30 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          brew install llvm@20 lld@20 pkgconf openssl@3 cmake ninja
-          llvm_prefix="$(brew --prefix llvm@20)"
-          openssl_prefix="$(brew --prefix openssl@3)"
-          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
-          echo "CC=$llvm_prefix/bin/clang" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$openssl_prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          brew install llvm@20 lld@20 pkgconf openssl@3 cmake ninja zstd
+          echo "LLVM_DIR=$(brew --prefix llvm@20)/lib/cmake/llvm" >> "$GITHUB_ENV"
+          echo "LLD_DIR=$(brew --prefix lld@20)/lib/cmake/lld" >> "$GITHUB_ENV"
+          echo "ZSTD_LIBRARY=$(brew --prefix zstd)/lib/libzstd.dylib" >> "$GITHUB_ENV"
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - name: Build Toka toolchain from main
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/tokalang/toka.git "$RUNNER_TEMP/toka-source"
           cmake -S "$RUNNER_TEMP/toka-source" -B "$RUNNER_TEMP/toka-source/build" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            ${LLVM_DIR:+-DLLVM_DIR="$LLVM_DIR"} \
+            ${LLD_DIR:+-DLLD_DIR="$LLD_DIR"} \
+            ${ZSTD_LIBRARY:+-DZSTD_LIBRARY="$ZSTD_LIBRARY"} \
+            ${OPENSSL_ROOT_DIR:+-DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR"}
           cmake --build "$RUNNER_TEMP/toka-source/build"
           sdk="$RUNNER_TEMP/toka-sdk"
-          mkdir -p "$sdk/bin" "$sdk/lib/sys"
+          mkdir -p "$sdk/bin" "$sdk/lib/sys" "$sdk/lib/toolchain"
           cp "$RUNNER_TEMP/toka-source/build/bin/tokac" "$sdk/bin/tokac"
           cp "$RUNNER_TEMP/toka-source/build/bin/toka" "$sdk/bin/toka"
           cp -r "$RUNNER_TEMP/toka-source/lib/"* "$sdk/lib/"
+          cp "$RUNNER_TEMP/toka-source/tools/scripts/toka_build.py" "$sdk/lib/toolchain/toka_build.py"
           cp "$RUNNER_TEMP/toka-source/build/lib/sys/toka_rt.o" "$sdk/lib/sys/toka_rt.o"
           echo "$sdk/bin" >> "$GITHUB_PATH"
           echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
@@ -120,10 +125,11 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
           cmake --build "$RUNNER_TEMP/toka-source/build"
           sdk="$RUNNER_TEMP/toka-sdk"
-          mkdir -p "$sdk/bin" "$sdk/lib/sys"
+          mkdir -p "$sdk/bin" "$sdk/lib/sys" "$sdk/lib/toolchain"
           cp "$RUNNER_TEMP/toka-source/build/bin/tokac" "$sdk/bin/tokac"
           cp "$RUNNER_TEMP/toka-source/build/bin/toka" "$sdk/bin/toka"
           cp -r "$RUNNER_TEMP/toka-source/lib/"* "$sdk/lib/"
+          cp "$RUNNER_TEMP/toka-source/tools/scripts/toka_build.py" "$sdk/lib/toolchain/toka_build.py"
           cp "$RUNNER_TEMP/toka-source/build/lib/sys/toka_rt.o" "$sdk/lib/sys/toka_rt.o"
           echo "$sdk/bin" >> "$GITHUB_PATH"
           echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
