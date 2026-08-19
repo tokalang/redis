@@ -3,6 +3,8 @@ import std/net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream}
 import std/task::{block_on, sleep_async, task_cancel}
 import std/vec::{Vec}
 
+extern fn toka_rt_test_task_has_active_timer_wait(tcb: *void) -> i32
+
 fn bytes_from_text(value: str) -> Vec<u8> {
     auto bytes# = Vec<u8>::with_capacity(value.len())
     auto index# = 0:usize
@@ -43,19 +45,26 @@ fn is_ok(value: RedisValue) -> bool {
 fn wait_for_pool_async(cede pool: RedisPool) -> async i32 {
     auto pool# = cede pool
     auto acquired_outcome = pool#.acquire_async(1000:i32).await?
-    if acquired_outcome.is_none() { return 0 }
-    auto acquired = acquired_outcome.unwrap()
-    if acquired.is_ok() {
-        auto lease# = acquired.unwrap()
-        lease#.close()
-        return 1
+    match cede acquired_outcome {
+        auto Option::None => {
+            // Task cancellation unwound through .await?
+            return 10
+        }
+        auto Option::Some('res) => {
+            auto res = cede 'res
+            if res.is_ok() {
+                auto lease# = res.unwrap()
+                lease#.close()
+                return 1
+            }
+            auto failure = res.unwrap_err()
+            if failure.kind.as_str().equals("pool") &&
+               failure.message.as_str().equals("Redis pool acquire was canceled") {
+                return 0
+            }
+            return 2
+        }
     }
-    auto failure = acquired.unwrap_err()
-    if failure.kind.as_str().equals("pool") &&
-       failure.message.as_str().equals("Redis pool acquire was canceled") {
-        return 0
-    }
-    return 2
 }
 
 fn constructor_validation() -> i32 {
@@ -105,7 +114,17 @@ fn reuse_client_async(port: u16) -> async i32 {
         if timed_out.is_ok() { return 4 }
         if !timed_out.unwrap_err().message.as_str().equals("Redis pool acquire timed out") { return 4 }
         auto waiter = wait_for_pool_async(cede pool#.clone()).start
-        sleep_async(5:i32).await
+        auto waited# = 0:i32
+        loop waited < 100:i32 {
+            if toka_rt_test_task_has_active_timer_wait(waiter.coro_handle) != 0 {
+                break
+            }
+            sleep_async(1:i32).await
+            waited = waited + 1:i32
+        }
+        if toka_rt_test_task_has_active_timer_wait(waiter.coro_handle) == 0 {
+            return 50
+        }
         task_cancel<i32>(waiter)
         if waiter.await != 0:i32 { return 5 }
         auto reply = lease#.execute_async(cede RedisCommand::new("PING")).await
