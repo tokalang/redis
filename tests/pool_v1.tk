@@ -43,6 +43,9 @@ fn is_ok(value: RedisValue) -> bool {
     }
 }
 
+// Qualifies that a canceled pool waiter unwinds cleanly through .await?
+// at the internal retry sleep timer boundary, without acquiring a lease
+// or corrupting connection pool capacity. Domain error translation is deferred.
 fn wait_for_pool_async(cede pool: RedisPool) -> async i32 {
     auto pool# = cede pool
     auto acquired_outcome = pool#.acquire_async(1000:i32).await?
