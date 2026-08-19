@@ -68,7 +68,7 @@ jobs:
           git clone --depth 1 https://github.com/tokalang/toka.git "$RUNNER_TEMP/toka-source"
           cmake -S "$RUNNER_TEMP/toka-source" -B "$RUNNER_TEMP/toka-source/build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/toka-source/build" --target tokac toka
+          cmake --build "$RUNNER_TEMP/toka-source/build"
           sdk="$RUNNER_TEMP/toka-sdk"
           mkdir -p "$sdk/bin" "$sdk/lib/sys"
           cp "$RUNNER_TEMP/toka-source/build/bin/tokac" "$sdk/bin/tokac"
@@ -118,7 +118,7 @@ jobs:
           git clone --depth 1 https://github.com/tokalang/toka.git "$RUNNER_TEMP/toka-source"
           cmake -S "$RUNNER_TEMP/toka-source" -B "$RUNNER_TEMP/toka-source/build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/toka-source/build" --target tokac toka
+          cmake --build "$RUNNER_TEMP/toka-source/build"
           sdk="$RUNNER_TEMP/toka-sdk"
           mkdir -p "$sdk/bin" "$sdk/lib/sys"
           cp "$RUNNER_TEMP/toka-source/build/bin/tokac" "$sdk/bin/tokac"
